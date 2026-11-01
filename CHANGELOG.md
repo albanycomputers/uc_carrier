@@ -1,6 +1,10 @@
 # Changelog
 
-## 1.x-1.0.0-beta1 (unreleased)
+## 1.x-1.0.0-beta2 (unreleased)
+
+## 1.x-1.0.0-beta1 (2026-11-01)
+
+Git tag: `1.x-1.0.0-beta1`.
 
 - New: Carrier Rates. Shipping quotes from carrier price lists by weight
   band, size format and destination zone; price lists imported from CSV with
