@@ -1,0 +1,90 @@
+<?php
+/**
+ * @file
+ * Royal Mail (UK) for Carrier Rates.
+ */
+
+/**
+ * Implements hook_uc_carrier_info().
+ */
+function uc_carrier_royalmail_uc_carrier_info() {
+  $tracked_formats = array('large_letter' => array('weight' => 1000));
+
+  $carriers['royalmail'] = array(
+    'title' => t('Royal Mail'),
+    'description' => t('Royal Mail UK and international services, priced by size format, weight and destination zone.'),
+    'tracking_url' => 'https://www.royalmail.com/track-your-item#/tracking-results/[tracking-number]',
+
+    // Royal Mail's size formats, smallest first: max length, width, depth
+    // (mm) and weight (g).
+    'formats' => array(
+      'letter' => array('title' => t('Letter'), 'length' => 240, 'width' => 165, 'depth' => 5, 'weight' => 100),
+      'large_letter' => array('title' => t('Large letter'), 'length' => 353, 'width' => 250, 'depth' => 25, 'weight' => 750),
+      'small_parcel' => array('title' => t('Small parcel'), 'length' => 450, 'width' => 350, 'depth' => 160, 'weight' => 2000),
+      'medium_parcel' => array('title' => t('Medium parcel'), 'length' => 610, 'width' => 460, 'depth' => 460, 'weight' => 20000),
+    ),
+
+    'zones' => array(
+      'uk' => t('United Kingdom'),
+      'eu_1' => t('Europe Zone 1'),
+      'eu_2' => t('Europe Zone 2'),
+      'eu_3' => t('Europe Zone 3'),
+      'world_1' => t('World Zone 1'),
+      'world_2' => t('World Zone 2'),
+      'world_3' => t('World Zone 3'),
+    ),
+    'default_zone' => 'world_1',
+    'countries' => uc_carrier_royalmail_countries(),
+
+    'services' => array(
+      'first_class' => array('title' => t('1st Class'), 'enabled' => TRUE),
+      'second_class' => array('title' => t('2nd Class'), 'enabled' => TRUE),
+      'signed_first' => array('title' => t('Signed For 1st Class')),
+      'signed_second' => array('title' => t('Signed For 2nd Class')),
+      // Tracked takes large letters up to 1kg (750g for other services).
+      'tracked_24' => array('title' => t('Tracked 24'), 'formats' => $tracked_formats),
+      'tracked_48' => array('title' => t('Tracked 48'), 'formats' => $tracked_formats),
+      'tracked_24_signed' => array('title' => t('Tracked 24 with Signature'), 'formats' => $tracked_formats),
+      'tracked_48_signed' => array('title' => t('Tracked 48 with Signature'), 'formats' => $tracked_formats),
+      'special_1pm' => array('title' => t('Special Delivery Guaranteed by 1pm')),
+      'special_1pm_sat' => array('title' => t('Special Delivery Guaranteed by 1pm with Saturday')),
+      'special_9am' => array('title' => t('Special Delivery Guaranteed by 9am')),
+      'special_9am_sat' => array('title' => t('Special Delivery Guaranteed by 9am with Saturday')),
+      'intl_economy' => array('title' => t('International Economy'), 'description' => t('Outside Europe only.')),
+      'intl_standard' => array('title' => t('International Standard'), 'enabled' => TRUE),
+      'intl_tracked' => array('title' => t('International Tracked'), 'description' => t('Includes International Tracked Heavier (medium parcels up to 20kg).')),
+      'intl_tracked_signed' => array('title' => t('International Tracked & Signed'), 'description' => t('Documents only.')),
+    ),
+
+    // Retail (stamp) prices from Royal Mail's "Our prices" guide, one JSON
+    // file per price change; new files arrive with module updates.
+    'price_lists' => backdrop_get_path('module', 'uc_carrier_royalmail') . '/prices',
+    'price_review_months' => 7,
+    // Royal Mail's latest price change (or announced next one): bump this in
+    // a release so sites are told when their prices are behind.
+    'latest_price_change' => '2026-10-05',
+    'price_changes' => t('Royal Mail usually changes its prices in April and October.'),
+  );
+
+  return $carriers;
+}
+
+/**
+ * Royal Mail's zone for each country, by ISO code. Anything else is World 1.
+ */
+function uc_carrier_royalmail_countries() {
+  $zones = array(
+    'uk' => array('GB', 'IM', 'JE', 'GG'),
+    'eu_1' => array('IE', 'DE', 'DK', 'FR', 'MC'),
+    'eu_2' => array('AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'EE', 'FI', 'GR', 'HU', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE'),
+    'eu_3' => array('AL', 'AD', 'AM', 'AZ', 'BY', 'BA', 'FO', 'GE', 'GI', 'GL', 'IS', 'KZ', 'XK', 'KG', 'LI', 'MK', 'MD', 'ME', 'NO', 'RU', 'SM', 'RS', 'CH', 'TJ', 'TR', 'TM', 'UA', 'UZ', 'VA'),
+    'world_2' => array('AU', 'CX', 'CC', 'CK', 'FJ', 'PF', 'IO', 'KI', 'LA', 'MO', 'NR', 'NC', 'NZ', 'NU', 'NF', 'PG', 'PN', 'SB', 'SG', 'TK', 'TO', 'TV', 'AS', 'WS', 'AQ'),
+    'world_3' => array('US'),
+  );
+
+  $countries = array();
+  foreach ($zones as $zone => $codes) {
+    $countries += array_fill_keys($codes, $zone);
+  }
+  return $countries;
+}

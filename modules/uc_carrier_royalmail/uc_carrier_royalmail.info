@@ -1,0 +1,8 @@
+name = Royal Mail (UK)
+description = Royal Mail UK and international services for Carrier Rates, with Royal Mail's zones and size formats.
+dependencies[] = uc_carrier
+package = Ubercart - fulfillment
+backdrop = 1.x
+type = module
+
+configure = admin/store/settings/quotes/carrier/royalmail

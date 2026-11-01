@@ -1,0 +1,1538 @@
+<?php
+/**
+ * @file
+ * Shipping quotes from carrier price lists, with tracking links.
+ *
+ * Carriers (Royal Mail, Parcelforce, DPD...) are defined by submodules through
+ * hook_uc_carrier_info(). This module turns each one into an Ubercart shipping
+ * method, works out the parcel (weight and size format), the destination zone
+ * and the price from an imported price list, and links tracking numbers.
+ *
+ * Weights are in grams and dimensions in millimetres throughout.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function uc_carrier_config_info() {
+  $prefixes['uc_carrier.settings'] = array(
+    'label' => t('Ubercart carrier rates settings'),
+    'group' => t('Configuration'),
+  );
+
+  return $prefixes;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function uc_carrier_permission() {
+  return array(
+    'administer carrier rates' => array(
+      'title' => t('Administer carrier rates'),
+      'description' => t('Configure carriers, zones and price lists.'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function uc_carrier_menu() {
+  $base = 'admin/store/settings/quotes/carrier/%uc_carrier';
+  $items[$base] = array(
+    'title callback' => 'uc_carrier_page_title',
+    'title arguments' => array(5),
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_settings_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/settings'] = array(
+    'title' => 'Settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  );
+  $items[$base . '/zones'] = array(
+    'title' => 'Zones',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_zones_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 0,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/services'] = array(
+    'title' => 'Services',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_services_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => -5,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/services/%'] = array(
+    'title' => 'Size limits',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_service_limits_form', 5, 7),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_CALLBACK,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/sizes'] = array(
+    'title' => 'Sizes',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_formats_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => -3,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices'] = array(
+    'title' => 'Prices',
+    'page callback' => 'uc_carrier_prices_page',
+    'page arguments' => array(5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 5,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices/new'] = array(
+    'title' => 'New price list',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_new_prices_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_ACTION,
+    'weight' => -1,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices/edit/%'] = array(
+    'title' => 'Edit prices',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_prices_edit_form', 5, 8),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_CALLBACK,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices/import'] = array(
+    'title' => 'Import price list',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_import_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_ACTION,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices/export/%'] = array(
+    'title' => 'Export price list',
+    'page callback' => 'uc_carrier_export_csv',
+    'page arguments' => array(5, 8),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_CALLBACK,
+    'file' => 'uc_carrier.admin.inc',
+  );
+  $items[$base . '/prices/delete/%'] = array(
+    'title' => 'Delete price list',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_delete_prices_form', 5, 8),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_CALLBACK,
+    'file' => 'uc_carrier.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_menu_local_tasks_alter().
+ *
+ * Price list and service limit pages (callbacks, so without tabs of their
+ * own) show the carrier's tabs with their parent tab active, so staff can
+ * get back after saving.
+ */
+function uc_carrier_menu_local_tasks_alter(&$data, $router_item, $root_path) {
+  $prefix = 'admin/store/settings/quotes/carrier/%/';
+  if (strpos($root_path, $prefix) !== 0 || !empty($data['tabs'][0]['output'])) {
+    return;
+  }
+  $parent = arg(6);
+  if (!in_array($parent, array('prices', 'services')) || !($carrier = uc_carrier_load(arg(5)))) {
+    return;
+  }
+  $base = 'admin/store/settings/quotes/carrier/' . $carrier['id'];
+  $tabs = array(
+    '' => t('Settings'),
+    'services' => t('Services'),
+    'sizes' => t('Sizes'),
+    'zones' => t('Zones'),
+    'prices' => t('Prices'),
+  );
+  $data['tabs'][0]['output'] = array();
+  foreach ($tabs as $suffix => $title) {
+    $data['tabs'][0]['output'][] = array(
+      '#theme' => 'menu_local_task',
+      '#link' => array(
+        'title' => $title,
+        'href' => $base . ($suffix ? '/' . $suffix : ''),
+        'localized_options' => array(),
+      ),
+      '#active' => $suffix == $parent,
+    );
+  }
+  $data['tabs'][0]['count'] = count($tabs);
+}
+
+/**
+ * Implements hook_theme().
+ */
+function uc_carrier_theme() {
+  return array(
+    'uc_carrier_zones_table' => array(
+      'render element' => 'element',
+      'file' => 'uc_carrier.admin.inc',
+    ),
+    'uc_carrier_prices_grid' => array(
+      'render element' => 'element',
+      'file' => 'uc_carrier.admin.inc',
+    ),
+    'uc_carrier_definitions_table' => array(
+      'render element' => 'element',
+      'file' => 'uc_carrier.admin.inc',
+    ),
+  );
+}
+
+/**
+ * Menu loader: %uc_carrier.
+ */
+function uc_carrier_load($carrier_id) {
+  $carriers = uc_carrier_carriers();
+  return isset($carriers[$carrier_id]) ? $carriers[$carrier_id] : FALSE;
+}
+
+/**
+ * Title callback for the carrier admin pages.
+ */
+function uc_carrier_page_title($carrier) {
+  return $carrier['title'];
+}
+
+/**
+ * Returns every carrier defined by hook_uc_carrier_info(), with defaults.
+ */
+function uc_carrier_carriers() {
+  $carriers = &backdrop_static(__FUNCTION__);
+
+  if (!isset($carriers)) {
+    $carriers = array();
+    foreach (module_implements('uc_carrier_info') as $module) {
+      foreach (module_invoke($module, 'uc_carrier_info') as $id => $carrier) {
+        $carrier += array(
+          'title' => $id,
+          'description' => '',
+          'tracking_url' => '',
+          'formats' => array(),
+          'zones' => array(),
+          'default_zone' => '',
+          'countries' => array(),
+          'services' => array(),
+          'price_lists' => '',
+          'price_review_months' => 12,
+          'price_changes' => '',
+          'latest_price_change' => '',
+        );
+        $carrier['id'] = $id;
+        $carrier['module'] = $module;
+        $carriers[$id] = $carrier;
+      }
+    }
+    backdrop_alter('uc_carrier_info', $carriers);
+
+    // The module's sizes, services and zones are defaults: a site may have
+    // its own (Sizes / Services / Zones tabs), e.g. after a carrier changes
+    // its products and before a module update.
+    $all = config_get('uc_carrier.settings', 'carriers');
+    foreach ($carriers as $id => &$carrier) {
+      $carrier['defaults'] = array(
+        'formats' => uc_carrier_normalise_formats($carrier['formats']),
+        'services' => uc_carrier_normalise_services($carrier['services']),
+        'zones' => $carrier['zones'],
+      );
+      $definitions = isset($all[$id]['definitions']) ? $all[$id]['definitions'] : array();
+      $carrier['customised'] = array_keys($definitions);
+      foreach (array('formats', 'services', 'zones') as $key) {
+        if (isset($definitions[$key])) {
+          $carrier[$key] = uc_carrier_definitions_apply($carrier['defaults'][$key], $definitions[$key]);
+        }
+      }
+      $carrier['formats'] = uc_carrier_normalise_formats($carrier['formats']);
+      $carrier['services'] = uc_carrier_normalise_services($carrier['services']);
+    }
+  }
+
+  return $carriers;
+}
+
+/**
+ * Fills in missing format limits (0 = no limit).
+ */
+function uc_carrier_normalise_formats(array $formats) {
+  foreach ($formats as &$format) {
+    $format += array('title' => '', 'length' => 0, 'width' => 0, 'depth' => 0, 'weight' => 0);
+  }
+  return $formats;
+}
+
+/**
+ * Fills in missing service keys.
+ */
+function uc_carrier_normalise_services(array $services) {
+  foreach ($services as &$service) {
+    $service += array('title' => '', 'description' => '', 'enabled' => FALSE, 'formats' => array());
+  }
+  return $services;
+}
+
+/**
+ * Saves a site's own sizes, services or zones for a carrier.
+ *
+ * @param string $carrier_id
+ *   The carrier.
+ * @param string $key
+ *   'formats', 'services' or 'zones'.
+ * @param array|null $value
+ *   The definitions, or NULL to go back to the module's defaults.
+ */
+function uc_carrier_definitions_save($carrier_id, $key, $value) {
+  // Store only the differences from the module's list.
+  if ($value !== NULL) {
+    backdrop_static_reset('uc_carrier_carriers');
+    $carrier = uc_carrier_load($carrier_id);
+    $value = uc_carrier_definitions_diff($carrier['defaults'][$key], $value);
+  }
+  $config = config('uc_carrier.settings');
+  $all = $config->get('carriers');
+  if ($value === NULL) {
+    unset($all[$carrier_id]['definitions'][$key]);
+    if (empty($all[$carrier_id]['definitions'])) {
+      unset($all[$carrier_id]['definitions']);
+    }
+  }
+  else {
+    $all[$carrier_id]['definitions'][$key] = $value;
+  }
+  $config->set('carriers', $all);
+  $config->save();
+  backdrop_static_reset('uc_carrier_carriers');
+}
+
+/**
+ * Works out a site's differences from a module's list of definitions.
+ *
+ * Only these are stored, so a module update that adds or changes items
+ * still reaches the site, while the site's own additions, changes,
+ * deletions and order are kept.
+ *
+ * @param array $defaults
+ *   The module's list (sizes, services or zones), keyed by machine name.
+ * @param array $list
+ *   The site's whole list, in its order.
+ *
+ * @return array|null
+ *   'items' (added items in full; for module items, only the changed
+ *   fields, or the new title for a zone), 'deleted' (module items removed)
+ *   and 'order'; or NULL when the list is the module's.
+ */
+function uc_carrier_definitions_diff(array $defaults, array $list) {
+  $items = array();
+  foreach ($list as $id => $item) {
+    if (!isset($defaults[$id])) {
+      $items[$id] = $item;
+    }
+    elseif (is_array($item)) {
+      $changed = array();
+      foreach ($item as $field => $value) {
+        if (!array_key_exists($field, $defaults[$id]) || $defaults[$id][$field] != $value) {
+          $changed[$field] = $value;
+        }
+      }
+      if ($changed) {
+        $items[$id] = $changed;
+      }
+    }
+    elseif ($item !== $defaults[$id]) {
+      $items[$id] = $item;
+    }
+  }
+  $deleted = array_values(array_diff(array_keys($defaults), array_keys($list)));
+  $order = array_keys($list);
+  if (!$items && !$deleted && $order === array_keys($defaults)) {
+    return NULL;
+  }
+  return array('items' => $items, 'deleted' => $deleted, 'order' => $order);
+}
+
+/**
+ * Applies a site's differences to a module's list of definitions.
+ *
+ * Items the module has added since the site saved its list are placed after
+ * the item that comes before them in the module's list.
+ *
+ * @see uc_carrier_definitions_diff()
+ */
+function uc_carrier_definitions_apply(array $defaults, array $site) {
+  $site += array('items' => array(), 'deleted' => array(), 'order' => array());
+  $list = $defaults;
+  foreach ($site['deleted'] as $id) {
+    unset($list[$id]);
+  }
+  foreach ($site['items'] as $id => $item) {
+    $list[$id] = isset($list[$id]) && is_array($list[$id]) && is_array($item) ? array_merge($list[$id], $item) : $item;
+  }
+
+  // The site's order, then anything new from the module after its
+  // predecessor in the module's list.
+  $ordered = array();
+  foreach ($site['order'] as $id) {
+    if (isset($list[$id])) {
+      $ordered[$id] = $list[$id];
+    }
+  }
+  $previous = NULL;
+  foreach (array_keys($defaults) as $id) {
+    if (isset($list[$id]) && !isset($ordered[$id])) {
+      $position = $previous === NULL ? 0 : array_search($previous, array_keys($ordered)) + 1;
+      $ordered = array_slice($ordered, 0, $position, TRUE) + array($id => $list[$id]) + array_slice($ordered, $position, NULL, TRUE);
+    }
+    if (isset($ordered[$id])) {
+      $previous = $id;
+    }
+  }
+  return $ordered + $list;
+}
+
+/**
+ * Makes a machine name from a title, unique among existing keys.
+ */
+function uc_carrier_machine_name($title, array $existing) {
+  $base = trim(preg_replace('/[^a-z0-9]+/', '_', strtolower($title)), '_');
+  $base = substr($base === '' ? 'item' : $base, 0, 28);
+  $name = $base;
+  $i = 2;
+  while (isset($existing[$name])) {
+    $name = $base . '_' . $i++;
+  }
+  return $name;
+}
+
+/**
+ * Returns a carrier's site settings, with defaults filled in.
+ */
+function uc_carrier_settings($carrier) {
+  $all = config_get('uc_carrier.settings', 'carriers');
+  $settings = isset($all[$carrier['id']]) ? $all[$carrier['id']] : array();
+  $settings += array(
+    'services' => array(),
+    'handling_fixed' => 0,
+    'handling_percent' => 0,
+    'packaging_weight' => 0,
+    'default_length' => 0,
+    'default_width' => 0,
+    'default_depth' => 0,
+    'fallback_rate' => '',
+    'fallback_label' => '',
+    'tracking_url' => '',
+    'countries' => array(),
+    'auto_import' => FALSE,
+    'supplied_handled' => array(),
+  );
+  foreach ($carrier['services'] as $id => $service) {
+    $settings['services'] += array($id => array());
+    $settings['services'][$id] += array(
+      'enabled' => $service['enabled'],
+      'label' => '',
+    );
+  }
+
+  return $settings;
+}
+
+/**
+ * Saves a carrier's site settings.
+ */
+function uc_carrier_settings_save($carrier_id, array $settings) {
+  $config = config('uc_carrier.settings');
+  $all = $config->get('carriers');
+  $all[$carrier_id] = $settings;
+  $config->set('carriers', $all);
+  $config->save();
+}
+
+/**
+ * Removes a carrier's settings and prices. Call from a carrier's uninstall.
+ */
+function uc_carrier_delete_carrier($carrier_id) {
+  db_delete('uc_carrier_rates')
+    ->condition('carrier', $carrier_id)
+    ->execute();
+  $config = config('uc_carrier.settings');
+  $all = $config->get('carriers');
+  unset($all[$carrier_id]);
+  $config->set('carriers', $all);
+  $config->save();
+}
+
+/**
+ * Implements hook_modules_enabled().
+ *
+ * Imports the price lists supplied with a newly enabled carrier.
+ */
+function uc_carrier_modules_enabled($modules) {
+  backdrop_static_reset('uc_carrier_carriers');
+  foreach (uc_carrier_carriers() as $carrier) {
+    if (!in_array($carrier['module'], $modules)) {
+      continue;
+    }
+    foreach (uc_carrier_pending_price_lists($carrier) as $date => $list) {
+      $result = uc_carrier_handle_supplied_list($carrier, $date);
+      if ($result && $result['errors']) {
+        backdrop_set_message(t('@list: not imported.', array('@list' => $list['title'])) . ' ' . implode(' ', array_slice($result['errors'], 0, 5)), 'warning');
+      }
+      elseif ($result) {
+        backdrop_set_message(t('@list: imported @count prices.', array('@list' => $list['title'], '@count' => $result['count'])));
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * Imports price lists supplied with module updates, for carriers set to do
+ * so automatically. Others are offered on the Prices page.
+ */
+function uc_carrier_cron() {
+  foreach (uc_carrier_carriers() as $carrier) {
+    $settings = uc_carrier_settings($carrier);
+    if (empty($settings['auto_import'])) {
+      continue;
+    }
+    foreach (uc_carrier_pending_price_lists($carrier) as $date => $list) {
+      $result = uc_carrier_handle_supplied_list($carrier, $date);
+      if ($result && !$result['errors']) {
+        watchdog('uc_carrier', '@list imported automatically (@count prices).', array('@list' => $list['title'], '@count' => $result['count']));
+      }
+      elseif ($result) {
+        watchdog('uc_carrier', '@list could not be imported: @errors', array('@list' => $list['title'], '@errors' => implode(' ', array_slice($result['errors'], 0, 5))), WATCHDOG_WARNING);
+      }
+    }
+  }
+}
+
+/**
+ * Returns the label shown to customers for a service.
+ */
+function uc_carrier_service_label($carrier, $settings, $service_id) {
+  if ($service_id == 'fallback') {
+    return $settings['fallback_label'] !== '' ? $settings['fallback_label'] : $carrier['title'];
+  }
+  if (!empty($settings['services'][$service_id]['label'])) {
+    return $settings['services'][$service_id]['label'];
+  }
+  return $carrier['title'] . ' ' . $carrier['services'][$service_id]['title'];
+}
+
+/**
+ * Implements hook_uc_shipping_method().
+ */
+function uc_carrier_uc_shipping_method() {
+  $methods = array();
+
+  foreach (uc_carrier_carriers() as $id => $carrier) {
+    $settings = uc_carrier_settings($carrier);
+    $accessorials = array();
+    foreach ($carrier['services'] as $service_id => $service) {
+      if (!empty($settings['services'][$service_id]['enabled'])) {
+        $accessorials[$service_id] = uc_carrier_service_label($carrier, $settings, $service_id);
+      }
+    }
+    if ($settings['fallback_rate'] !== '') {
+      $accessorials['fallback'] = uc_carrier_service_label($carrier, $settings, 'fallback');
+    }
+
+    $methods['carrier_' . $id] = array(
+      'id' => 'carrier_' . $id,
+      'module' => 'uc_carrier',
+      'title' => $carrier['title'],
+      'description' => $carrier['description'],
+      'operations' => array(
+        'configure' => array(
+          'title' => t('configure'),
+          'href' => 'admin/store/settings/quotes/carrier/' . $id,
+        ),
+      ),
+      'quote' => array(
+        'type' => 'order',
+        'callback' => 'uc_carrier_quote',
+        'accessorials' => $accessorials,
+      ),
+      'enabled' => FALSE,
+    );
+  }
+
+  return $methods;
+}
+
+/**
+ * Quote callback: prices every enabled service of a carrier.
+ *
+ * @param array $products
+ *   The order's shippable products.
+ * @param array $details
+ *   The delivery address (country, postal_code...).
+ * @param array $method
+ *   The shipping method, as defined in uc_carrier_uc_shipping_method().
+ *
+ * @return array
+ *   Quotes keyed by service ID.
+ */
+function uc_carrier_quote($products, $details, $method) {
+  $carrier = uc_carrier_load(substr($method['id'], strlen('carrier_')));
+  if (!$carrier) {
+    return array();
+  }
+  $settings = uc_carrier_settings($carrier);
+
+  $country_id = !empty($details['country']) ? $details['country'] : config_get('uc_store.settings', 'uc_store_country');
+  $zone = uc_carrier_country_zone($carrier, $settings, $country_id);
+  $packages = array(uc_carrier_package($products, $settings));
+  $context = array(
+    'products' => $products,
+    'carrier' => $carrier,
+    'settings' => $settings,
+  );
+  backdrop_alter('uc_carrier_packages', $packages, $context);
+  $effective = uc_carrier_active_price_list($carrier['id']);
+  $min_format = uc_carrier_min_format($products, $carrier);
+
+  $quotes = array();
+  if ($zone && $effective !== FALSE && $packages) {
+    foreach (array_keys($method['quote']['accessorials']) as $service_id) {
+      if ($service_id == 'fallback') {
+        continue;
+      }
+      // Every parcel must be priced, or the service cannot take the order.
+      $total = 0;
+      foreach ($packages as $package) {
+        $formats = uc_carrier_apply_min_format($carrier, uc_carrier_package_formats($carrier, $package, $service_id), $min_format);
+        $rate = uc_carrier_service_rate($carrier['id'], $service_id, $zone, $formats, $package['weight'], $effective);
+        if (!$rate) {
+          continue 2;
+        }
+        $total += $rate->price;
+      }
+      $label = check_plain(uc_carrier_service_label($carrier, $settings, $service_id));
+      if (count($packages) > 1) {
+        $label .= ' ' . t('(@count parcels)', array('@count' => count($packages)));
+      }
+      $quotes[$service_id] = array(
+        'rate' => uc_carrier_add_handling($total, $settings),
+        'label' => $label,
+        'option_label' => $label,
+      );
+    }
+  }
+
+  if (!$quotes && $settings['fallback_rate'] !== '') {
+    $label = check_plain(uc_carrier_service_label($carrier, $settings, 'fallback'));
+    $quotes['fallback'] = array(
+      'rate' => (float) $settings['fallback_rate'],
+      'label' => $label,
+      'option_label' => $label,
+    );
+  }
+
+  return $quotes;
+}
+
+/**
+ * Adds the handling fee to a price.
+ */
+function uc_carrier_add_handling($price, $settings) {
+  $price = $price * (1 + $settings['handling_percent'] / 100) + $settings['handling_fixed'];
+  return round($price, 2);
+}
+
+/**
+ * Works out the parcel for a set of products.
+ *
+ * Items are assumed to be stacked: the parcel is as long and wide as the
+ * largest item and as deep as all of them together. Items with no size (and
+ * no carrier default) count for weight only, as small extras do.
+ *
+ * @return array
+ *   'weight' in grams, 'dims' as array(length, width, depth) in millimetres
+ *   (longest first), or NULL when no item has a size.
+ */
+function uc_carrier_package($products, $settings) {
+  $weight = (float) $settings['packaging_weight'];
+  $length = $width = $depth = 0;
+  $known = FALSE;
+
+  foreach ($products as $product) {
+    $qty = isset($product->qty) ? $product->qty : 1;
+    $units = !empty($product->weight_units) ? $product->weight_units : config_get('uc_store.settings', 'uc_weight_unit');
+    $weight += $qty * $product->weight * uc_weight_conversion($units, 'g');
+
+    $dims = array();
+    if (!empty($product->length) && !empty($product->width) && !empty($product->height)) {
+      $units = !empty($product->length_units) ? $product->length_units : config_get('uc_store.settings', 'uc_length_unit');
+      $factor = uc_length_conversion($units, 'mm');
+      $dims = array($product->length * $factor, $product->width * $factor, $product->height * $factor);
+    }
+    elseif ($settings['default_length'] && $settings['default_width'] && $settings['default_depth']) {
+      $dims = array($settings['default_length'], $settings['default_width'], $settings['default_depth']);
+    }
+
+    if (!$dims) {
+      continue;
+    }
+    $known = TRUE;
+    rsort($dims);
+    $length = max($length, $dims[0]);
+    $width = max($width, $dims[1]);
+    $depth += $dims[2] * $qty;
+  }
+
+  $dims = NULL;
+  if ($known) {
+    // Protective wrapping goes once around the stack, on every side.
+    $padding = 2 * uc_carrier_products_padding($products);
+    $dims = array($length + $padding, $width + $padding, $depth + $padding);
+    rsort($dims);
+  }
+
+  return array('weight' => (int) ceil($weight), 'dims' => $dims);
+}
+
+/**
+ * Returns the thickest protective wrapping (mm per side) of some products.
+ */
+function uc_carrier_products_padding($products) {
+  $padding = 0;
+  foreach ($products as $product) {
+    if (!empty($product->uc_carrier['padding'])) {
+      $padding = max($padding, (int) $product->uc_carrier['padding']);
+    }
+  }
+  return $padding;
+}
+
+/**
+ * Returns the largest "ship as at least" size of some products for a carrier.
+ *
+ * @return string
+ *   A format ID of the carrier, or '' for none.
+ */
+function uc_carrier_min_format($products, $carrier) {
+  $order = array_flip(array_keys($carrier['formats']));
+  $min = '';
+  foreach ($products as $product) {
+    if (empty($product->uc_carrier['min_format'])) {
+      continue;
+    }
+    list($carrier_id, $format) = explode(':', $product->uc_carrier['min_format'] . ':');
+    if ($carrier_id == $carrier['id'] && isset($order[$format]) && ($min === '' || $order[$format] > $order[$min])) {
+      $min = $format;
+    }
+  }
+  return $min;
+}
+
+/**
+ * Drops formats smaller than a minimum from a list of fitting formats.
+ */
+function uc_carrier_apply_min_format($carrier, array $formats, $min) {
+  if ($min === '') {
+    return $formats;
+  }
+  $order = array_flip(array_keys($carrier['formats']));
+  return array_values(array_filter($formats, function ($format) use ($order, $min) {
+    return isset($order[$format]) && $order[$format] >= $order[$min];
+  }));
+}
+
+/**
+ * Returns a carrier's formats as a service sees them.
+ *
+ * A service may change a format's limits, e.g. Royal Mail Tracked takes
+ * large letters up to 1kg where other services stop at 750g.
+ */
+function uc_carrier_service_formats($carrier, $service_id = NULL) {
+  $formats = $carrier['formats'];
+  if ($service_id && !empty($carrier['services'][$service_id]['formats'])) {
+    foreach ($carrier['services'][$service_id]['formats'] as $id => $limits) {
+      if (isset($formats[$id])) {
+        $formats[$id] = $limits + $formats[$id];
+      }
+    }
+  }
+  return $formats;
+}
+
+/**
+ * Returns the carrier's formats the parcel fits, smallest first.
+ *
+ * When the parcel's size is unknown, only weight is checked.
+ *
+ * @param array $carrier
+ *   The carrier.
+ * @param array $package
+ *   The parcel, as from uc_carrier_package().
+ * @param string $service_id
+ *   (optional) Use this service's limits for the formats.
+ */
+function uc_carrier_package_formats($carrier, $package, $service_id = NULL) {
+  $fits = array();
+
+  foreach (uc_carrier_service_formats($carrier, $service_id) as $id => $format) {
+    if ($format['weight'] && $package['weight'] > $format['weight']) {
+      continue;
+    }
+    if ($package['dims']) {
+      $limits = array($format['length'], $format['width'], $format['depth']);
+      rsort($limits);
+      foreach ($limits as $i => $limit) {
+        if ($limit && $package['dims'][$i] > $limit) {
+          continue 2;
+        }
+      }
+    }
+    $fits[] = $id;
+  }
+
+  return $fits;
+}
+
+/**
+ * Returns the zone a country belongs to for a carrier, or '' if none.
+ */
+function uc_carrier_country_zone($carrier, $settings, $country_id) {
+  $iso = db_query('SELECT country_iso_code_2 FROM {uc_countries} WHERE country_id = :id', array(':id' => $country_id))->fetchField();
+  if (!$iso) {
+    return '';
+  }
+  if (isset($settings['countries'][$iso])) {
+    return $settings['countries'][$iso];
+  }
+  if (isset($carrier['countries'][$iso])) {
+    return $carrier['countries'][$iso];
+  }
+  return $carrier['default_zone'];
+}
+
+/**
+ * Returns the effective dates of a carrier's price lists, newest first.
+ */
+function uc_carrier_price_lists($carrier_id) {
+  return db_query('SELECT effective, COUNT(*) AS count FROM {uc_carrier_rates} WHERE carrier = :carrier GROUP BY effective ORDER BY effective DESC', array(':carrier' => $carrier_id))->fetchAllKeyed();
+}
+
+/**
+ * Returns the effective date of the price list in force now, or FALSE.
+ */
+function uc_carrier_active_price_list($carrier_id) {
+  $effective = db_query('SELECT MAX(effective) FROM {uc_carrier_rates} WHERE carrier = :carrier AND effective <= :now', array(
+    ':carrier' => $carrier_id,
+    ':now' => REQUEST_TIME,
+  ))->fetchField();
+
+  return $effective === NULL ? FALSE : (int) $effective;
+}
+
+/**
+ * Returns a warning if a carrier's prices in force may be out of date.
+ *
+ * Prices in force older than the carrier's review period (Royal Mail: 7
+ * months, as it changes prices each April and October), with no newer list
+ * scheduled, may no longer be what the carrier charges. Prices only rise,
+ * so out-of-date prices usually under-charge.
+ *
+ * @return string
+ *   The warning (HTML), or '' when the prices look current.
+ */
+function uc_carrier_price_age_warning($carrier) {
+  $lists = uc_carrier_price_lists($carrier['id']);
+  $active = uc_carrier_active_price_list($carrier['id']);
+  if ($active === FALSE || !$active) {
+    return '';
+  }
+  $newest = max(array_keys($lists));
+
+  // A known price change the site has no list for: say so plainly.
+  $change = uc_carrier_latest_price_change($carrier);
+  if ($change && $newest < $change) {
+    $args = array(
+      '@carrier' => $carrier['title'],
+      '@change' => format_date($change, 'custom', 'j F Y'),
+      '@active' => format_date($active, 'custom', 'j F Y'),
+    );
+    if ($change <= REQUEST_TIME) {
+      return t('@carrier changed its prices on @change. The prices in force on this site are from @active.', $args) . ' ' . uc_carrier_price_update_advice();
+    }
+    if ($change - REQUEST_TIME <= 60 * 86400) {
+      return t('@carrier prices change on @change. Prepare a new price list from that date (New price list on the Prices tab).', $args) . ' ' . uc_carrier_price_update_advice(TRUE);
+    }
+  }
+
+  // Otherwise, warn when the prices are simply old.
+  if ($newest > $active) {
+    return '';
+  }
+  if ($active > strtotime('-' . (int) $carrier['price_review_months'] . ' months', REQUEST_TIME)) {
+    return '';
+  }
+  $message = t('The @carrier prices in force are from @date and may be out of date.', array(
+    '@carrier' => $carrier['title'],
+    '@date' => format_date($active, 'custom', 'j F Y'),
+  ));
+  if ($carrier['price_changes'] !== '') {
+    $message .= ' ' . check_plain($carrier['price_changes']);
+  }
+  return $message . ' ' . uc_carrier_price_update_advice();
+}
+
+/**
+ * Returns the date of the carrier's latest known price change, or 0.
+ *
+ * The later of the carrier module's own date (hook_uc_carrier_info()
+ * 'latest_price_change', bumped in a release) and the site's config
+ * (uc_carrier.settings: price_changes.<carrier>, which a price notice or
+ * subscription feed, or an admin, can set without a release). It may be in
+ * the future when a change has been announced.
+ */
+function uc_carrier_latest_price_change($carrier) {
+  $dates = array($carrier['latest_price_change']);
+  $config = config_get('uc_carrier.settings', 'price_changes');
+  if (!empty($config[$carrier['id']])) {
+    $dates[] = $config[$carrier['id']];
+  }
+  $latest = 0;
+  foreach ($dates as $date) {
+    if ($date && ($time = strtotime($date))) {
+      $latest = max($latest, $time);
+    }
+  }
+  return $latest;
+}
+
+/**
+ * Returns the advice on keeping prices up to date.
+ *
+ * Mentions the price update subscription once one is configured
+ * (uc_carrier.settings: subscription_url).
+ *
+ * @param bool $subscription_only
+ *   Only the subscription offer (or nothing, if there is none).
+ */
+function uc_carrier_price_update_advice($subscription_only = FALSE) {
+  $url = config_get('uc_carrier.settings', 'subscription_url');
+  $url = $url ? check_url($url) : '';
+  if ($subscription_only) {
+    return $url ? t('Or <a href="@url">subscribe for automatic price updates</a>.', array('@url' => $url)) : '';
+  }
+  if ($url) {
+    return t('Check them against the carrier and update them on the Prices tab, or <a href="@url">subscribe for automatic price updates</a>.', array('@url' => $url));
+  }
+  return t('Check them against the carrier and update them on the Prices tab.');
+}
+
+/**
+ * Finds the price for a service.
+ *
+ * Tries the formats in order (smallest first), then rows that apply to any
+ * format, and takes the lowest weight band the parcel fits.
+ *
+ * @return object|false
+ *   The {uc_carrier_rates} row, or FALSE when the service cannot take it.
+ */
+function uc_carrier_service_rate($carrier_id, $service_id, $zone, array $formats, $weight, $effective) {
+  $formats[] = '';
+  $rows = db_query('SELECT * FROM {uc_carrier_rates} WHERE carrier = :carrier AND service = :service AND zone = :zone AND effective = :effective AND max_weight >= :weight AND format IN (:formats) ORDER BY max_weight, price', array(
+    ':carrier' => $carrier_id,
+    ':service' => $service_id,
+    ':zone' => $zone,
+    ':effective' => $effective,
+    ':weight' => $weight,
+    ':formats' => $formats,
+  ))->fetchAll();
+
+  foreach ($formats as $format) {
+    foreach ($rows as $row) {
+      if ($row->format === $format) {
+        return $row;
+      }
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Imports price rows into a price list, all or nothing.
+ *
+ * @param array $carrier
+ *   The carrier.
+ * @param array $raw
+ *   Rows, each array(service, zone, format, max_weight, price,
+ *   compensation) as strings or numbers, keyed by a label for messages
+ *   (e.g. "Line 5").
+ * @param int $effective
+ *   Timestamp the list applies from (0 = always).
+ * @param bool $replace
+ *   Delete an existing list with the same effective date first.
+ *
+ * @return array
+ *   'count' of rows imported and 'errors', a list of messages.
+ */
+function uc_carrier_import_rows($carrier, array $raw, $effective, $replace = TRUE) {
+  $result = array('count' => 0, 'errors' => array());
+  $rows = array();
+  foreach ($raw as $label => $data) {
+    $data = array_map('trim', array_map('strval', array_pad(array_values($data), 6, '')));
+    list($service, $zone, $format, $max_weight, $price, $compensation) = $data;
+    $args = array('@label' => $label);
+    if (!isset($carrier['services'][$service])) {
+      $result['errors'][] = t('@label: unknown service %value.', $args + array('%value' => $service));
+    }
+    elseif (!isset($carrier['zones'][$zone])) {
+      $result['errors'][] = t('@label: unknown zone %value.', $args + array('%value' => $zone));
+    }
+    elseif ($format !== '' && !isset($carrier['formats'][$format])) {
+      $result['errors'][] = t('@label: unknown size %value.', $args + array('%value' => $format));
+    }
+    elseif (!ctype_digit($max_weight) || !is_numeric($price)) {
+      $result['errors'][] = t('@label: weight and price must be numbers.', $args);
+    }
+    else {
+      $rows[] = array(
+        'carrier' => $carrier['id'],
+        'service' => $service,
+        'zone' => $zone,
+        'format' => $format,
+        'max_weight' => (int) $max_weight,
+        'price' => $price,
+        'compensation' => is_numeric($compensation) ? $compensation : NULL,
+        'effective' => (int) $effective,
+      );
+    }
+  }
+
+  if ($result['errors']) {
+    // All or nothing: a half-imported price list would quote wrongly.
+    return $result;
+  }
+
+  $transaction = db_transaction();
+  if ($replace) {
+    db_delete('uc_carrier_rates')
+      ->condition('carrier', $carrier['id'])
+      ->condition('effective', (int) $effective)
+      ->execute();
+  }
+  if ($rows) {
+    $query = db_insert('uc_carrier_rates')->fields(array_keys($rows[0]));
+    foreach ($rows as $row) {
+      $query->values($row);
+    }
+    $query->execute();
+  }
+  $result['count'] = count($rows);
+
+  return $result;
+}
+
+/**
+ * Imports a price list CSV for a carrier.
+ *
+ * Columns: service, zone, format, max_weight (grams), price, compensation.
+ * The first row is a header. Format may be empty (any size).
+ *
+ * @see uc_carrier_import_rows()
+ */
+function uc_carrier_import_csv($carrier, $path, $effective, $replace = TRUE) {
+  if (!($handle = fopen($path, 'r'))) {
+    return array('count' => 0, 'errors' => array(t('Could not open @path.', array('@path' => $path))));
+  }
+  $raw = array();
+  $line = 1;
+  fgetcsv($handle);
+  while (($data = fgetcsv($handle)) !== FALSE) {
+    $line++;
+    if (count($data) == 1 && trim($data[0]) === '') {
+      continue;
+    }
+    $raw[t('Line @line', array('@line' => $line))] = $data;
+  }
+  fclose($handle);
+
+  return uc_carrier_import_rows($carrier, $raw, $effective, $replace);
+}
+
+/**
+ * Reads a JSON price list file.
+ *
+ * Format: {"carrier", "effective" (Y-m-d), "title", "source", "prices": [
+ * {"service", "zones": [...], "format", "compensation", "bands":
+ * {"<max grams>": price, ...}}, ...]}.
+ *
+ * @return array|false
+ *   The decoded list, or FALSE if it is not a price list.
+ */
+function uc_carrier_read_json($path) {
+  $data = json_decode((string) @file_get_contents($path), TRUE);
+  if (!is_array($data) || !isset($data['prices']) || !is_array($data['prices'])) {
+    return FALSE;
+  }
+  return $data + array('carrier' => '', 'effective' => '', 'title' => '', 'source' => '');
+}
+
+/**
+ * Imports a decoded JSON price list.
+ *
+ * @param array $carrier
+ *   The carrier.
+ * @param array $data
+ *   As from uc_carrier_read_json().
+ * @param int|null $effective
+ *   Timestamp to use, or NULL for the list's own effective date.
+ * @param bool $replace
+ *   Delete an existing list with the same effective date first.
+ *
+ * @see uc_carrier_import_rows()
+ */
+function uc_carrier_import_json($carrier, array $data, $effective = NULL, $replace = TRUE) {
+  if ($data['carrier'] !== '' && $data['carrier'] !== $carrier['id']) {
+    return array('count' => 0, 'errors' => array(t('This price list is for %carrier.', array('%carrier' => $data['carrier']))));
+  }
+  if ($effective === NULL) {
+    $effective = $data['effective'] ? strtotime($data['effective']) : 0;
+  }
+  $raw = array();
+  foreach ($data['prices'] as $i => $block) {
+    $block += array('service' => '', 'zones' => array(), 'format' => '', 'compensation' => '', 'bands' => array());
+    foreach ((array) $block['zones'] as $zone) {
+      foreach ((array) $block['bands'] as $weight => $price) {
+        $label = t('Block @n, @zone @weight g', array('@n' => $i + 1, '@zone' => $zone, '@weight' => $weight));
+        $raw[$label] = array($block['service'], $zone, $block['format'], $weight, $price, $block['compensation'] === NULL ? '' : $block['compensation']);
+      }
+    }
+  }
+  return uc_carrier_import_rows($carrier, $raw, $effective, $replace);
+}
+
+/**
+ * Returns a price list as JSON, in the format uc_carrier_read_json() reads.
+ *
+ * Zones with the same prices share a block; one block per line, prices to
+ * two decimals, in the carrier's order, so files are readable and diff well.
+ */
+function uc_carrier_price_list_json($carrier, $effective, $title = '', $source = '') {
+  $result = db_query('SELECT * FROM {uc_carrier_rates} WHERE carrier = :carrier AND effective = :effective ORDER BY max_weight', array(
+    ':carrier' => $carrier['id'],
+    ':effective' => $effective,
+  ));
+  $groups = array();
+  foreach ($result as $rate) {
+    $compensation = $rate->compensation === NULL ? NULL : (float) $rate->compensation;
+    $key = $rate->service . '|' . $rate->format . '|' . $compensation;
+    $groups[$key]['service'] = $rate->service;
+    $groups[$key]['format'] = $rate->format;
+    $groups[$key]['compensation'] = $compensation;
+    $groups[$key]['zones'][$rate->zone][$rate->max_weight] = number_format($rate->price, 2, '.', '');
+  }
+
+  $position = function ($order, $key) {
+    return isset($order[$key]) ? $order[$key] : 999;
+  };
+  $service_order = array_flip(array_keys($carrier['services']));
+  $format_order = array_flip(array_keys($carrier['formats']));
+  $zone_order = array_flip(array_keys($carrier['zones']));
+  uasort($groups, function ($a, $b) use ($position, $service_order, $format_order) {
+    $pairs = array(
+      array($position($service_order, $a['service']), $position($service_order, $b['service'])),
+      array($position($format_order, $a['format']), $position($format_order, $b['format'])),
+      array((float) $a['compensation'], (float) $b['compensation']),
+    );
+    foreach ($pairs as $pair) {
+      if ($pair[0] != $pair[1]) {
+        return $pair[0] <=> $pair[1];
+      }
+    }
+    return 0;
+  });
+
+  $lines = array();
+  foreach ($groups as $group) {
+    uksort($group['zones'], function ($a, $b) use ($position, $zone_order) {
+      return $position($zone_order, $a) <=> $position($zone_order, $b);
+    });
+    $by_bands = array();
+    foreach ($group['zones'] as $zone => $bands) {
+      $signature = serialize($bands);
+      $by_bands[$signature]['zones'][] = $zone;
+      $by_bands[$signature]['bands'] = $bands;
+    }
+    foreach ($by_bands as $block) {
+      $bands = array();
+      foreach ($block['bands'] as $weight => $price) {
+        $bands[] = '"' . $weight . '": ' . $price;
+      }
+      $line = '{ "service": ' . json_encode($group['service']) . ', "zones": ' . json_encode($block['zones']) . ', "format": ' . json_encode($group['format']);
+      if ($group['compensation'] !== NULL) {
+        $line .= ', "compensation": ' . rtrim(rtrim(number_format($group['compensation'], 2, '.', ''), '0'), '.');
+      }
+      $lines[] = $line . ', "bands": { ' . implode(', ', $bands) . ' } }';
+    }
+  }
+
+  $header = array(
+    'carrier' => $carrier['id'],
+    'effective' => $effective ? date('Y-m-d', $effective) : '',
+    'title' => $title,
+    'source' => $source,
+  );
+  $out = "{\n";
+  foreach ($header as $key => $value) {
+    $out .= '    "' . $key . '": ' . json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ",\n";
+  }
+  return $out . "    \"prices\": [\n        " . implode(",\n        ", $lines) . "\n    ]\n}\n";
+}
+
+/**
+ * Returns the price lists supplied with a carrier's module.
+ *
+ * @return array
+ *   Keyed by effective date (Y-m-d), oldest first: 'path', 'title',
+ *   'effective' (timestamp).
+ */
+function uc_carrier_supplied_price_lists($carrier) {
+  $lists = array();
+  if ($carrier['price_lists'] && is_dir($carrier['price_lists'])) {
+    foreach (glob($carrier['price_lists'] . '/*.json') as $path) {
+      $data = uc_carrier_read_json($path);
+      if ($data && ($data['carrier'] === '' || $data['carrier'] === $carrier['id']) && $data['effective']) {
+        $lists[$data['effective']] = array(
+          'path' => $path,
+          'title' => $data['title'] !== '' ? $data['title'] : t('@carrier prices from @date', array('@carrier' => $carrier['title'], '@date' => $data['effective'])),
+          'effective' => strtotime($data['effective']),
+        );
+      }
+    }
+    ksort($lists);
+  }
+  return $lists;
+}
+
+/**
+ * Imports a supplied price list, keeping the site's own additions.
+ *
+ * The supplied list is taken as correct for everything it covers. Prices
+ * the site added for things it does not cover (a service, zone, size or
+ * cover level of the site's own) are carried over from the list in force
+ * before it, so they do not disappear when the new list takes over.
+ *
+ * @return array
+ *   As uc_carrier_import_rows(), plus 'carried', the number carried over.
+ */
+function uc_carrier_import_supplied($carrier, array $data, $effective) {
+  $covered = array();
+  foreach ($data['prices'] as $block) {
+    $block += array('service' => '', 'zones' => array(), 'format' => '', 'compensation' => NULL);
+    foreach ((array) $block['zones'] as $zone) {
+      $compensation = $block['compensation'] === NULL || $block['compensation'] === '' ? '' : (string) (float) $block['compensation'];
+      $covered[$block['service'] . '|' . $zone . '|' . $block['format'] . '|' . $compensation] = TRUE;
+    }
+  }
+
+  $previous = db_query('SELECT MAX(effective) FROM {uc_carrier_rates} WHERE carrier = :carrier AND effective < :effective', array(
+    ':carrier' => $carrier['id'],
+    ':effective' => $effective,
+  ))->fetchField();
+  $carried = array();
+  if ($previous !== NULL) {
+    $result = db_query('SELECT * FROM {uc_carrier_rates} WHERE carrier = :carrier AND effective = :effective', array(
+      ':carrier' => $carrier['id'],
+      ':effective' => $previous,
+    ));
+    foreach ($result as $rate) {
+      $compensation = $rate->compensation === NULL ? '' : (string) (float) $rate->compensation;
+      if (!isset($covered[$rate->service . '|' . $rate->zone . '|' . $rate->format . '|' . $compensation])) {
+        $carried[] = $rate;
+      }
+    }
+  }
+
+  $result = uc_carrier_import_json($carrier, $data, $effective);
+  if (!$result['errors'] && $carried) {
+    $query = db_insert('uc_carrier_rates')->fields(array('carrier', 'service', 'zone', 'format', 'max_weight', 'price', 'compensation', 'effective'));
+    foreach ($carried as $rate) {
+      $query->values(array($carrier['id'], $rate->service, $rate->zone, $rate->format, $rate->max_weight, $rate->price, $rate->compensation, $effective));
+    }
+    $query->execute();
+  }
+  $result['carried'] = count($carried);
+  return $result;
+}
+
+/**
+ * Returns supplied price lists the site has neither imported nor ignored.
+ */
+function uc_carrier_pending_price_lists($carrier) {
+  $settings = uc_carrier_settings($carrier);
+  return array_diff_key(uc_carrier_supplied_price_lists($carrier), array_flip($settings['supplied_handled']));
+}
+
+/**
+ * Imports a supplied price list, or marks it ignored.
+ *
+ * @param array $carrier
+ *   The carrier.
+ * @param string $date
+ *   The list's effective date, Y-m-d.
+ * @param bool $import
+ *   FALSE to ignore it.
+ *
+ * @return array|null
+ *   The import result, or NULL when ignored or not found.
+ */
+function uc_carrier_handle_supplied_list($carrier, $date, $import = TRUE, $replace = FALSE) {
+  $lists = uc_carrier_supplied_price_lists($carrier);
+  if (!isset($lists[$date])) {
+    return NULL;
+  }
+  $result = NULL;
+  if ($import) {
+    $effective = $lists[$date]['effective'];
+    if (!$replace && isset(uc_carrier_price_lists($carrier['id'])[$effective])) {
+      // The site already has its own list from that date: it wins.
+      $result = array('count' => 0, 'errors' => array(), 'kept' => TRUE);
+    }
+    else {
+      $result = uc_carrier_import_supplied($carrier, uc_carrier_read_json($lists[$date]['path']), $effective);
+      if ($result['errors']) {
+        return $result;
+      }
+    }
+  }
+  $settings = uc_carrier_settings($carrier);
+  $settings['supplied_handled'][] = $date;
+  $settings['supplied_handled'] = array_values(array_unique($settings['supplied_handled']));
+  uc_carrier_settings_save($carrier['id'], $settings);
+  return $result;
+}
+
+/**
+ * Returns the tracking URL for a number, or '' when the carrier has none.
+ */
+function uc_carrier_tracking_url($carrier, $tracking_number) {
+  $settings = uc_carrier_settings($carrier);
+  $pattern = $settings['tracking_url'] !== '' ? $settings['tracking_url'] : $carrier['tracking_url'];
+  if ($pattern === '') {
+    return '';
+  }
+  return str_replace('[tracking-number]', rawurlencode($tracking_number), $pattern);
+}
+
+/**
+ * Returns the carrier a shipment was sent with, or FALSE.
+ *
+ * Matches the shipping method, or else the Carrier text against carrier
+ * titles, so shipments entered by hand are linked too.
+ */
+function uc_carrier_shipment_carrier($shipment) {
+  foreach (uc_carrier_carriers() as $id => $carrier) {
+    if ($shipment->shipping_method == 'carrier_' . $id || strcasecmp(trim($shipment->carrier), $carrier['title']) == 0) {
+      return $carrier;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Implements hook_uc_order_pane_alter().
+ */
+function uc_carrier_uc_order_pane_alter(&$panes) {
+  if (isset($panes['packages'])) {
+    $panes['packages']['callback'] = 'uc_carrier_order_pane_packages';
+  }
+}
+
+/**
+ * Order pane callback: uc_shipping's tracking numbers, linked to the carrier.
+ *
+ * @see uc_shipping_order_pane_packages()
+ */
+function uc_carrier_order_pane_packages($op, $order) {
+  switch ($op) {
+    case 'view':
+    case 'customer':
+      $tracking = array();
+      $result = db_query('SELECT sid FROM {uc_shipments} WHERE order_id = :id', array(':id' => $order->order_id));
+      foreach ($result as $record) {
+        $shipment = uc_shipping_shipment_load($record->sid);
+        $carrier = uc_carrier_shipment_carrier($shipment);
+        $numbers = array();
+        if ($shipment->tracking_number) {
+          $numbers[] = $shipment->tracking_number;
+        }
+        else {
+          foreach ($shipment->packages as $package) {
+            if ($package->tracking_number) {
+              $numbers[] = $package->tracking_number;
+            }
+          }
+        }
+        foreach ($numbers as $number) {
+          $url = $carrier ? uc_carrier_tracking_url($carrier, $number) : '';
+          $tracking[$shipment->carrier]['data'] = check_plain($shipment->carrier);
+          $tracking[$shipment->carrier]['children'][] = $url ? l($number, $url, array('external' => TRUE, 'attributes' => array('target' => '_blank', 'rel' => 'noopener'))) : check_plain($number);
+        }
+      }
+
+      // Do not show an empty pane to customers.
+      if ($op == 'view' || !empty($tracking)) {
+        $build['tracking'] = array(
+          '#theme' => 'item_list',
+          '#items' => $tracking,
+        );
+        return $build;
+      }
+      break;
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for uc_shipping_shipment_edit().
+ *
+ * Fills in Carrier and Shipment options on a new shipment from the service
+ * the customer chose.
+ */
+function uc_carrier_form_uc_shipping_shipment_edit_alter(&$form, &$form_state) {
+  $order = $form_state['build_info']['args'][0];
+  if (isset($form['sid']) || empty($order->quote['method']) || strpos($order->quote['method'], 'carrier_') !== 0) {
+    return;
+  }
+  $carrier = uc_carrier_load(substr($order->quote['method'], strlen('carrier_')));
+  if (!$carrier) {
+    return;
+  }
+  $settings = uc_carrier_settings($carrier);
+  $service_id = $order->quote['accessorials'];
+
+  if ($form['shipment']['carrier']['#default_value'] === '') {
+    $form['shipment']['carrier']['#default_value'] = $carrier['title'];
+  }
+  if ($form['shipment']['accessorials']['#default_value'] === '' && ($service_id == 'fallback' || isset($carrier['services'][$service_id]))) {
+    $form['shipment']['accessorials']['#default_value'] = uc_carrier_service_label($carrier, $settings, $service_id);
+  }
+}
+
+/**
+ * Implements hook_form_BASE_FORM_ID_alter() for node_form.
+ *
+ * Adds packing settings to products, in uc_quote's Shipping section.
+ */
+function uc_carrier_form_node_form_alter(&$form, &$form_state) {
+  if (!uc_product_is_product_form($form, $form_state)) {
+    return;
+  }
+  // Form alters run module by module, so uc_quote may not have built its
+  // Shipping section yet; it adds to an existing one rather than replacing.
+  if (!isset($form['shipping'])) {
+    $form['shipping'] = array();
+  }
+  $node = $form['#node'];
+  $values = isset($node->uc_carrier) ? $node->uc_carrier : array('min_format' => '', 'padding' => 0);
+
+  $options = array('' => t('- Smallest that fits -'));
+  foreach (uc_carrier_carriers() as $id => $carrier) {
+    foreach ($carrier['formats'] as $format_id => $format) {
+      $options[$carrier['title']][$id . ':' . $format_id] = $format['title'];
+    }
+  }
+
+  $form['shipping']['uc_carrier'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Packing'),
+    '#tree' => TRUE,
+    '#weight' => 5,
+  );
+  $form['shipping']['uc_carrier']['min_format'] = array(
+    '#type' => 'select',
+    '#title' => t('Ship as at least'),
+    '#options' => $options,
+    '#default_value' => $values['min_format'],
+    '#description' => t('For an item that would fit a smaller size but needs more protection, e.g. a cap that is better as a small parcel than a large letter. The largest in the order applies.'),
+  );
+  $form['shipping']['uc_carrier']['padding'] = array(
+    '#type' => 'number',
+    '#title' => t('Protective wrapping'),
+    '#min' => 0,
+    '#field_suffix' => t('mm per side'),
+    '#default_value' => $values['padding'],
+    '#description' => t('Bubble wrap or padding around the packed items, added once on every side of the parcel, not to each item: 20 mm makes three 20 mm deep frames 100 mm, not 120 mm. The thickest in a parcel applies.'),
+  );
+}
+
+/**
+ * Implements hook_node_load().
+ */
+function uc_carrier_node_load($nodes, $types) {
+  $product_types = uc_product_types();
+  $nids = array();
+  foreach ($nodes as $node) {
+    if (in_array($node->type, $product_types)) {
+      $nids[] = $node->nid;
+    }
+  }
+  if (!$nids) {
+    return;
+  }
+  $result = db_query('SELECT nid, min_format, padding FROM {uc_carrier_products} WHERE nid IN (:nids)', array(':nids' => $nids));
+  foreach ($result as $row) {
+    $nodes[$row->nid]->uc_carrier = array('min_format' => $row->min_format, 'padding' => (int) $row->padding);
+  }
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function uc_carrier_node_insert($node) {
+  uc_carrier_node_update($node);
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function uc_carrier_node_update($node) {
+  if (!isset($node->uc_carrier) || !uc_product_is_product($node->type)) {
+    return;
+  }
+  $values = $node->uc_carrier + array('min_format' => '', 'padding' => 0);
+  if ($values['min_format'] === '' && !$values['padding']) {
+    db_delete('uc_carrier_products')->condition('nid', $node->nid)->execute();
+    return;
+  }
+  db_merge('uc_carrier_products')
+    ->key(array('nid' => $node->nid))
+    ->fields(array('min_format' => $values['min_format'], 'padding' => (int) $values['padding']))
+    ->execute();
+}
+
+/**
+ * Implements hook_node_delete().
+ */
+function uc_carrier_node_delete($node) {
+  db_delete('uc_carrier_products')->condition('nid', $node->nid)->execute();
+}

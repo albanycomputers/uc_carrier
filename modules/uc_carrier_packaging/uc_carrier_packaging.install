@@ -1,0 +1,113 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_carrier_packaging module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function uc_carrier_packaging_schema() {
+  $mm = array(
+    'type' => 'numeric',
+    'precision' => 10,
+    'scale' => 1,
+    'not null' => TRUE,
+    'default' => 0,
+  );
+
+  $schema['uc_carrier_packaging'] = array(
+    'description' => 'Packaging types: boxes, envelopes, bags.',
+    'fields' => array(
+      'pid' => array(
+        'description' => 'Primary key: the packaging ID.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'name' => array(
+        'description' => 'Name shown to staff, e.g. "DL envelope".',
+        'type' => 'varchar',
+        'length' => 128,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'inner_length' => array('description' => 'Inside length, mm.') + $mm,
+      'inner_width' => array('description' => 'Inside width, mm.') + $mm,
+      'inner_depth' => array('description' => 'Inside depth, mm.') + $mm,
+      'outer_length' => array('description' => 'Outside length, mm; 0 = inside.') + $mm,
+      'outer_width' => array('description' => 'Outside width, mm; 0 = inside.') + $mm,
+      'outer_depth' => array('description' => 'Outside depth, mm; 0 = inside.') + $mm,
+      'weight' => array(
+        'description' => 'Weight of the packaging and filler, grams.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'max_weight' => array(
+        'description' => 'Most it can hold, grams; 0 = no limit.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'stock' => array(
+        'description' => 'Number in stock.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'reorder_level' => array(
+        'description' => 'Warn when stock falls to this.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'estimated' => array(
+        'description' => 'Whatever is to hand: typical size, stock not counted.',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'status' => array(
+        'description' => 'Whether it is in use.',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 1,
+      ),
+    ),
+    'primary key' => array('pid'),
+  );
+
+  $schema['uc_carrier_packaging_usage'] = array(
+    'description' => 'Packaging used for each shipped package, so stock can be put back.',
+    'fields' => array(
+      'package_id' => array(
+        'description' => 'The {uc_packages}.package_id.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'pid' => array(
+        'description' => 'The {uc_carrier_packaging}.pid.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'counted' => array(
+        'description' => 'Whether stock was taken off (0 for estimated packaging).',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('package_id'),
+    'indexes' => array('pid' => array('pid')),
+  );
+
+  return $schema;
+}

@@ -1,0 +1,12 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_carrier_royalmail module.
+ */
+
+/**
+ * Implements hook_uninstall().
+ */
+function uc_carrier_royalmail_uninstall() {
+  uc_carrier_delete_carrier('royalmail');
+}

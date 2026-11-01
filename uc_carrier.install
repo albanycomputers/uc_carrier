@@ -1,0 +1,170 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_carrier module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function uc_carrier_schema() {
+  $schema['uc_carrier_rates'] = array(
+    'description' => 'Carrier price list rows: one price per service, zone, format and weight band.',
+    'fields' => array(
+      'rid' => array(
+        'description' => 'Primary key: the rate ID.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'carrier' => array(
+        'description' => 'The carrier machine name, from hook_uc_carrier_info().',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'service' => array(
+        'description' => 'The service machine name.',
+        'type' => 'varchar',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'zone' => array(
+        'description' => 'The destination zone machine name.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'format' => array(
+        'description' => 'The size format machine name, or empty for any size.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'max_weight' => array(
+        'description' => 'Upper limit of the weight band, in grams.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'price' => array(
+        'description' => 'The price, in the store default currency.',
+        'type' => 'numeric',
+        'precision' => 16,
+        'scale' => 5,
+        'not null' => TRUE,
+        'default' => 0.0,
+      ),
+      'compensation' => array(
+        'description' => 'Compensation (cover) included, for information.',
+        'type' => 'numeric',
+        'precision' => 16,
+        'scale' => 5,
+        'not null' => FALSE,
+      ),
+      'effective' => array(
+        'description' => 'Unix timestamp from which this price list applies; 0 for always.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('rid'),
+    'indexes' => array(
+      'carrier_effective' => array('carrier', 'effective'),
+      'lookup' => array('carrier', 'service', 'zone'),
+    ),
+  );
+
+  $schema['uc_carrier_products'] = _uc_carrier_products_schema();
+
+  return $schema;
+}
+
+/**
+ * Returns the schema of {uc_carrier_products}.
+ */
+function _uc_carrier_products_schema() {
+  return array(
+    'description' => 'Per-product packing settings for carrier quotes.',
+    'fields' => array(
+      'nid' => array(
+        'description' => 'The product {node}.nid.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'min_format' => array(
+        'description' => 'Smallest size to ship as, "carrier:format", or empty.',
+        'type' => 'varchar',
+        'length' => 100,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'padding' => array(
+        'description' => 'Protective wrapping added once around the packed items, mm per side.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('nid'),
+  );
+}
+
+/**
+ * Implements hook_requirements().
+ *
+ * Reports price lists supplied with a module update that the site has not
+ * imported or ignored.
+ */
+function uc_carrier_requirements($phase) {
+  $requirements = array();
+  if ($phase != 'runtime' || !function_exists('uc_carrier_carriers')) {
+    return $requirements;
+  }
+  $t = get_t();
+  $methods = uc_quote_methods();
+  foreach (uc_carrier_carriers() as $id => $carrier) {
+    if (isset($methods['carrier_' . $id]) && ($warning = uc_carrier_price_age_warning($carrier))) {
+      $requirements['uc_carrier_age_' . $id] = array(
+        'title' => $t('@carrier prices', array('@carrier' => $carrier['title'])),
+        'value' => $t('May be out of date'),
+        'description' => $warning . ' ' . l($t('Prices'), 'admin/store/settings/quotes/carrier/' . $id . '/prices'),
+        'severity' => REQUIREMENT_WARNING,
+      );
+    }
+    $pending = uc_carrier_pending_price_lists($carrier);
+    if ($pending) {
+      $titles = array();
+      foreach ($pending as $list) {
+        $titles[] = $list['title'];
+      }
+      $requirements['uc_carrier_' . $id] = array(
+        'title' => $t('@carrier price lists', array('@carrier' => $carrier['title'])),
+        'value' => $t('New price list available'),
+        'description' => $t('%lists supplied with a module update. <a href="@url">Import or ignore it</a> on the Prices tab.', array(
+          '%lists' => implode(', ', $titles),
+          '@url' => url('admin/store/settings/quotes/carrier/' . $id . '/prices'),
+        )),
+        'severity' => REQUIREMENT_WARNING,
+      );
+    }
+  }
+  return $requirements;
+}
+
+/**
+ * Adds per-product packing settings (ship as at least, protective wrapping).
+ */
+function uc_carrier_update_1000() {
+  if (!db_table_exists('uc_carrier_products')) {
+    db_create_table('uc_carrier_products', _uc_carrier_products_schema());
+  }
+}

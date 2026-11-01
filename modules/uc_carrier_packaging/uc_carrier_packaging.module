@@ -1,0 +1,671 @@
+<?php
+/**
+ * @file
+ * Packaging stock for Carrier Rates.
+ *
+ * Quotes use the smallest packaging that holds the order, or split it across
+ * several; the shipment form records what was really used and takes it off
+ * stock; low stock is flagged. Packaging marked "Estimated" is whatever is to
+ * hand: it has a typical size and weight and its stock is not counted.
+ *
+ * Weights are in grams and dimensions in millimetres.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function uc_carrier_packaging_config_info() {
+  $prefixes['uc_carrier_packaging.settings'] = array(
+    'label' => t('Ubercart carrier packaging settings'),
+    'group' => t('Configuration'),
+  );
+
+  return $prefixes;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function uc_carrier_packaging_menu() {
+  $base = 'admin/store/settings/quotes/packaging';
+  $items[$base] = array(
+    'title' => 'Packaging',
+    'description' => 'Boxes, envelopes and bags: sizes, weights and stock.',
+    'page callback' => 'uc_carrier_packaging_list_page',
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 5,
+    'file' => 'uc_carrier_packaging.admin.inc',
+  );
+  $items[$base . '/list'] = array(
+    'title' => 'Packaging',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  );
+  $items[$base . '/analysis'] = array(
+    'title' => 'Product analysis',
+    'page callback' => 'uc_carrier_packaging_analysis_page',
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'uc_carrier_packaging.admin.inc',
+  );
+  $items[$base . '/add'] = array(
+    'title' => 'Add packaging',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_packaging_edit_form'),
+    'access arguments' => array('administer carrier rates'),
+    'type' => MENU_LOCAL_ACTION,
+    'file' => 'uc_carrier_packaging.admin.inc',
+  );
+  $items[$base . '/%uc_carrier_packaging'] = array(
+    'title' => 'Edit packaging',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_packaging_edit_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'file' => 'uc_carrier_packaging.admin.inc',
+  );
+  $items[$base . '/%uc_carrier_packaging/delete'] = array(
+    'title' => 'Delete packaging',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('uc_carrier_packaging_delete_form', 5),
+    'access arguments' => array('administer carrier rates'),
+    'file' => 'uc_carrier_packaging.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Menu loader: %uc_carrier_packaging.
+ */
+function uc_carrier_packaging_load($pid) {
+  $all = uc_carrier_packaging_all();
+  return isset($all[$pid]) ? $all[$pid] : FALSE;
+}
+
+/**
+ * Returns all packaging, smallest inside volume first.
+ *
+ * @param bool $active_only
+ *   Only packaging in use.
+ */
+function uc_carrier_packaging_all($active_only = FALSE) {
+  $all = &backdrop_static(__FUNCTION__);
+  if (!isset($all)) {
+    $all = db_query('SELECT * FROM {uc_carrier_packaging} ORDER BY inner_length * inner_width * inner_depth, weight, name')->fetchAllAssoc('pid');
+    foreach ($all as $box) {
+      $box->inner = array((float) $box->inner_length, (float) $box->inner_width, (float) $box->inner_depth);
+      rsort($box->inner);
+      $outer = array((float) $box->outer_length, (float) $box->outer_width, (float) $box->outer_depth);
+      $box->outer = array_filter($outer) ? $outer : $box->inner;
+      rsort($box->outer);
+      $box->volume = $box->inner[0] * $box->inner[1] * $box->inner[2];
+    }
+  }
+  if ($active_only) {
+    return array_filter($all, function ($box) {
+      return $box->status;
+    });
+  }
+  return $all;
+}
+
+/**
+ * Whether a packaging type can be used now: estimated, or in stock.
+ */
+function uc_carrier_packaging_available($box) {
+  return $box->estimated || $box->stock > 0;
+}
+
+/**
+ * Turns products into a list of single items to pack.
+ *
+ * @param array $products
+ *   Products with qty, weight, weight_units and, ideally, length, width,
+ *   height and length_units.
+ * @param array $defaults
+ *   Default item size array(length, width, depth) in mm for products without
+ *   one, or an empty array.
+ *
+ * @return array
+ *   Items, largest first, each with 'dims' (mm, longest first, or NULL),
+ *   'volume', 'weight' (g), 'padding' (protective wrapping, mm per side)
+ *   and 'nid'. FALSE when there are too many to pack
+ *   one by one.
+ */
+function uc_carrier_packaging_items(array $products, array $defaults = array()) {
+  $items = array();
+  $count = 0;
+  foreach ($products as $product) {
+    $qty = isset($product->qty) ? (int) $product->qty : 1;
+    $count += $qty;
+    if ($count > 200) {
+      return FALSE;
+    }
+    $units = !empty($product->weight_units) ? $product->weight_units : config_get('uc_store.settings', 'uc_weight_unit');
+    $weight = $product->weight * uc_weight_conversion($units, 'g');
+
+    $dims = NULL;
+    if (!empty($product->length) && !empty($product->width) && !empty($product->height)) {
+      $units = !empty($product->length_units) ? $product->length_units : config_get('uc_store.settings', 'uc_length_unit');
+      $factor = uc_length_conversion($units, 'mm');
+      $dims = array($product->length * $factor, $product->width * $factor, $product->height * $factor);
+    }
+    elseif (count(array_filter($defaults)) == 3) {
+      $dims = $defaults;
+    }
+    if ($dims) {
+      rsort($dims);
+    }
+
+    $padding = !empty($product->uc_carrier['padding']) ? (int) $product->uc_carrier['padding'] : 0;
+    for ($i = 0; $i < $qty; $i++) {
+      $items[] = array(
+        'dims' => $dims,
+        'volume' => $dims ? $dims[0] * $dims[1] * $dims[2] : 0,
+        'weight' => $weight,
+        'padding' => $padding,
+        'nid' => isset($product->nid) ? $product->nid : 0,
+      );
+    }
+  }
+  usort($items, function ($a, $b) {
+    return $b['volume'] <=> $a['volume'];
+  });
+
+  return $items;
+}
+
+/**
+ * Whether an item fits inside a box, in any orientation.
+ *
+ * @param array $item
+ *   The item.
+ * @param object $box
+ *   The packaging.
+ * @param int $padding
+ *   Protective wrapping, mm per side, taken off the inside.
+ */
+function uc_carrier_packaging_item_fits($item, $box, $padding = 0) {
+  if (!$item['dims']) {
+    return TRUE;
+  }
+  foreach ($item['dims'] as $i => $size) {
+    if ($size > $box->inner[$i] - 2 * $padding) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+/**
+ * Whether a set of items fits in a box.
+ *
+ * The thickest protective wrapping among the items is taken once off every
+ * side of the inside. Each item must fit what is left; together they may
+ * fill only the fill factor of it (a single item may fill it completely);
+ * and the box's weight limit must hold.
+ */
+function uc_carrier_packaging_items_fit(array $items, $box) {
+  $padding = 0;
+  foreach ($items as $item) {
+    $padding = max($padding, isset($item['padding']) ? $item['padding'] : 0);
+  }
+  $space = 1;
+  foreach ($box->inner as $size) {
+    $space *= max(0, $size - 2 * $padding);
+  }
+
+  $volume = $weight = 0;
+  foreach ($items as $item) {
+    if (!uc_carrier_packaging_item_fits($item, $box, $padding)) {
+      return FALSE;
+    }
+    $volume += $item['volume'];
+    $weight += $item['weight'];
+  }
+  if ($box->max_weight && $weight > $box->max_weight) {
+    return FALSE;
+  }
+  if (count($items) > 1) {
+    $fill = config_get('uc_carrier_packaging.settings', 'fill_factor') / 100;
+    if ($volume > $space * $fill) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+/**
+ * Returns the smallest box that holds the items, preferring boxes in stock.
+ *
+ * @return object|false
+ *   The packaging, or FALSE when none holds them.
+ */
+function uc_carrier_packaging_smallest(array $items, array $boxes) {
+  $fallback = FALSE;
+  foreach ($boxes as $box) {
+    if (uc_carrier_packaging_items_fit($items, $box)) {
+      if (uc_carrier_packaging_available($box)) {
+        return $box;
+      }
+      if (!$fallback) {
+        $fallback = $box;
+      }
+    }
+  }
+  return $fallback;
+}
+
+/**
+ * Returns packaging in use that is not too small for a minimum size.
+ *
+ * Packaging whose outside makes a smaller size than a product's "ship as at
+ * least" (e.g. a large letter mailer for a cap that must go as a small
+ * parcel) is left out, unless nothing else is left.
+ */
+function uc_carrier_packaging_boxes_for($carrier, $min_format) {
+  $boxes = uc_carrier_packaging_all(TRUE);
+  if ($min_format === '') {
+    return $boxes;
+  }
+  $order = array_flip(array_keys($carrier['formats']));
+  $suitable = array_filter($boxes, function ($box) use ($carrier, $order, $min_format) {
+    $formats = uc_carrier_package_formats($carrier, array('weight' => 0, 'dims' => $box->outer));
+    return !$formats || $order[$formats[0]] >= $order[$min_format];
+  });
+  return $suitable ? $suitable : $boxes;
+}
+
+/**
+ * Packs items into as few boxes as reasonable.
+ *
+ * One box if any holds everything. Otherwise items (largest first) go into
+ * the first open box with room, opening the largest suitable box when none
+ * has; then each box is swapped for the smallest that holds its contents.
+ * Not optimal packing, but sensible for small shops.
+ *
+ * @return array|false
+ *   A list of array('box' => packaging, 'items' => items), or FALSE when an
+ *   item fits no packaging.
+ */
+function uc_carrier_packaging_pack(array $items, $boxes = NULL) {
+  if ($boxes === NULL) {
+    $boxes = uc_carrier_packaging_all(TRUE);
+  }
+  if (!$items || !$boxes) {
+    return FALSE;
+  }
+
+  if ($box = uc_carrier_packaging_smallest($items, $boxes)) {
+    return array(array('box' => $box, 'items' => $items));
+  }
+
+  // Largest first, available ones before the rest.
+  $largest = array_reverse($boxes, TRUE);
+  uasort($largest, function ($a, $b) {
+    return uc_carrier_packaging_available($b) <=> uc_carrier_packaging_available($a);
+  });
+
+  $parcels = array();
+  foreach ($items as $item) {
+    foreach ($parcels as &$parcel) {
+      if (uc_carrier_packaging_items_fit(array_merge($parcel['items'], array($item)), $parcel['box'])) {
+        $parcel['items'][] = $item;
+        continue 2;
+      }
+    }
+    unset($parcel);
+    foreach ($largest as $box) {
+      if (uc_carrier_packaging_items_fit(array($item), $box)) {
+        $parcels[] = array('box' => $box, 'items' => array($item));
+        continue 2;
+      }
+    }
+    return FALSE;
+  }
+
+  foreach ($parcels as &$parcel) {
+    $parcel['box'] = uc_carrier_packaging_smallest($parcel['items'], $boxes);
+  }
+  unset($parcel);
+
+  return $parcels;
+}
+
+/**
+ * Implements hook_uc_carrier_packages_alter().
+ *
+ * Replaces the stacked estimate with real packaging. Products with no size
+ * (and no carrier default) count for weight only and are assumed to fit
+ * alongside the rest, as stickers and badges do; if no product has a size,
+ * or something fits no packaging, the estimate stays.
+ */
+function uc_carrier_packaging_uc_carrier_packages_alter(array &$packages, array $context) {
+  $settings = $context['settings'];
+  $defaults = array($settings['default_length'], $settings['default_width'], $settings['default_depth']);
+  $items = uc_carrier_packaging_items($context['products'], $defaults);
+  if (!$items || !$items[0]['dims']) {
+    // Items are sorted largest first, so the first having no size means
+    // none has.
+    return;
+  }
+  $boxes = uc_carrier_packaging_boxes_for($context['carrier'], uc_carrier_min_format($context['products'], $context['carrier']));
+  if (!($parcels = uc_carrier_packaging_pack($items, $boxes))) {
+    return;
+  }
+
+  $packages = array();
+  foreach ($parcels as $parcel) {
+    $weight = $parcel['box']->weight;
+    foreach ($parcel['items'] as $item) {
+      $weight += $item['weight'];
+    }
+    $packages[] = array(
+      'weight' => (int) ceil($weight),
+      'dims' => $parcel['box']->outer,
+      'packaging' => $parcel['box']->pid,
+    );
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for uc_shipping_shipment_edit().
+ *
+ * Adds "Packaging used" to each package, suggesting the smallest that fits.
+ */
+function uc_carrier_packaging_form_uc_shipping_shipment_edit_alter(&$form, &$form_state) {
+  if (empty($form['packages'])) {
+    return;
+  }
+  $boxes = uc_carrier_packaging_all();
+  if (!$boxes) {
+    return;
+  }
+
+  $carrier = uc_carrier_packaging_order_carrier($form_state['build_info']['args'][0]);
+
+  foreach (element_children($form['packages']) as $package_id) {
+    $package = uc_shipping_package_load($package_id);
+    $used = db_query('SELECT pid FROM {uc_carrier_packaging_usage} WHERE package_id = :id', array(':id' => $package_id))->fetchField();
+
+    $options = array('' => t('- Not recorded -'));
+    foreach ($boxes as $box) {
+      if (!$box->status && $box->pid != $used) {
+        continue;
+      }
+      // Select options are escaped when rendered, so the name goes in raw.
+      $options[$box->pid] = $box->estimated ? t('!name (estimated)', array('!name' => $box->name)) : t('!name (@count in stock)', array('!name' => $box->name, '@count' => $box->stock));
+    }
+
+    $suggested = '';
+    $note = '';
+    if (!$used) {
+      // uc_shipping's package weight is already multiplied by qty.
+      foreach ($package->products as $product) {
+        $product->weight = $product->weight / max(1, $product->qty);
+      }
+      list($parcels, $sized) = uc_carrier_packaging_suggest($package->products, $carrier);
+      if (!$sized) {
+        $note = t('No product here has a size, so no packaging can be suggested.');
+      }
+      elseif ($parcels && count($parcels) == 1) {
+        $suggested = $parcels[0]['box']->pid;
+        $note = t('Suggested: the smallest packaging that holds these items.');
+      }
+      elseif ($parcels) {
+        $note = t('These items need @count parcels: split them into more packages on the Packages tab.', array('@count' => count($parcels)));
+      }
+      else {
+        $note = t('No packaging holds these items (or a product has no size).');
+      }
+    }
+
+    $form['packages'][$package_id]['uc_carrier_packaging'] = array(
+      '#type' => 'select',
+      '#title' => t('Packaging used'),
+      '#options' => $options,
+      '#default_value' => $used ? $used : $suggested,
+      '#description' => $note,
+      '#weight' => -5,
+    );
+  }
+  $form['#submit'][] = 'uc_carrier_packaging_shipment_submit';
+}
+
+/**
+ * Returns the carrier an order was quoted with, or FALSE.
+ */
+function uc_carrier_packaging_order_carrier($order) {
+  if (!empty($order->quote['method']) && strpos($order->quote['method'], 'carrier_') === 0) {
+    return uc_carrier_load(substr($order->quote['method'], strlen('carrier_')));
+  }
+  return FALSE;
+}
+
+/**
+ * Suggests packaging for order products.
+ *
+ * @param array $order_products
+ *   Order (or package) products: nid, qty, weight and weight_units per item.
+ *   Sizes and packing settings come from the product nodes.
+ * @param array|false $carrier
+ *   The carrier quoted, for products' "Ship as at least".
+ *
+ * @return array
+ *   array($parcels, $sized): parcels as uc_carrier_packaging_pack() (FALSE
+ *   when nothing fits), and whether any product has a size.
+ */
+function uc_carrier_packaging_suggest(array $order_products, $carrier) {
+  $products = array();
+  foreach ($order_products as $product) {
+    $node = node_load($product->nid);
+    $products[] = (object) array(
+      'nid' => $product->nid,
+      'title' => isset($product->title) ? $product->title : ($node ? $node->title : ''),
+      'qty' => $product->qty,
+      'weight' => $node ? $node->weight : $product->weight,
+      'weight_units' => $node ? $node->weight_units : $product->weight_units,
+      'length' => $node ? $node->length : 0,
+      'width' => $node ? $node->width : 0,
+      'height' => $node ? $node->height : 0,
+      'length_units' => $node ? $node->length_units : '',
+      'uc_carrier' => $node && isset($node->uc_carrier) ? $node->uc_carrier : array(),
+    );
+  }
+  $items = uc_carrier_packaging_items($products);
+  $sized = $items && $items[0]['dims'];
+  if (!$sized) {
+    return array(FALSE, FALSE);
+  }
+  $boxes = $carrier ? uc_carrier_packaging_boxes_for($carrier, uc_carrier_min_format($products, $carrier)) : uc_carrier_packaging_all(TRUE);
+  return array(uc_carrier_packaging_pack($items, $boxes), TRUE);
+}
+
+/**
+ * Implements hook_uc_order_pane().
+ */
+function uc_carrier_packaging_uc_order_pane() {
+  $panes['uc_carrier_packaging'] = array(
+    'callback' => 'uc_carrier_packaging_order_pane',
+    'title' => t('Packing'),
+    'desc' => t('Suggested packaging for the order, from Carrier Rates Packaging.'),
+    'class' => 'pos-left',
+    'weight' => 6,
+    'show' => array('view'),
+  );
+  return $panes;
+}
+
+/**
+ * Order pane callback: what to pack the order in.
+ *
+ * Packaging already recorded on shipments is shown instead, once there is
+ * any.
+ */
+function uc_carrier_packaging_order_pane($op, $order) {
+  if ($op != 'view' || !uc_order_is_shippable($order)) {
+    return;
+  }
+
+  $used = db_query('SELECT p.name, COUNT(*) AS count FROM {uc_carrier_packaging_usage} u INNER JOIN {uc_packages} pk ON pk.package_id = u.package_id INNER JOIN {uc_carrier_packaging} p ON p.pid = u.pid WHERE pk.order_id = :order GROUP BY p.name', array(':order' => $order->order_id))->fetchAllKeyed();
+  if ($used) {
+    $items = array();
+    foreach ($used as $name => $count) {
+      $items[] = check_plain($name) . ($count > 1 ? ' x ' . $count : '');
+    }
+    return array(
+      'intro' => array('#markup' => '<p>' . t('Packaging used:') . '</p>'),
+      'list' => array('#theme' => 'item_list', '#items' => $items),
+    );
+  }
+
+  $shippable = array();
+  foreach ($order->products as $product) {
+    if (uc_order_product_is_shippable($product)) {
+      $shippable[] = $product;
+    }
+  }
+  list($parcels, $sized) = uc_carrier_packaging_suggest($shippable, uc_carrier_packaging_order_carrier($order));
+  if (!$sized) {
+    return array('#markup' => '<p>' . t('No product in this order has a size, so no packaging can be suggested.') . '</p>');
+  }
+  if (!$parcels) {
+    return array('#markup' => '<p>' . t('No packaging in use holds these items.') . ' ' . l(t('Packaging'), 'admin/store/settings/quotes/packaging') . '</p>');
+  }
+
+  $titles = array();
+  foreach ($shippable as $product) {
+    $titles[$product->nid] = $product->title;
+  }
+  $items = array();
+  foreach ($parcels as $parcel) {
+    $box = $parcel['box'];
+    $contents = array();
+    foreach ($parcel['items'] as $item) {
+      $title = isset($titles[$item['nid']]) ? $titles[$item['nid']] : '';
+      $contents[$title] = isset($contents[$title]) ? $contents[$title] + 1 : 1;
+    }
+    $list = array();
+    foreach ($contents as $title => $qty) {
+      $list[] = $qty . ' x ' . check_plain($title);
+    }
+    $stock = $box->estimated ? t('estimated') : format_plural($box->stock, '1 in stock', '@count in stock');
+    $items[] = '<strong>' . check_plain($box->name) . '</strong> (' . $stock . '): ' . implode(', ', $list);
+  }
+  $build['intro'] = array('#markup' => '<p>' . format_plural(count($parcels), 'Suggested packaging:', 'Suggested packaging (@count parcels):') . '</p>');
+  $build['list'] = array('#theme' => 'item_list', '#items' => $items);
+  $build['note'] = array('#markup' => '<p class="description">' . t('Record what you use on the shipment; that takes it off stock.') . '</p>');
+  return $build;
+}
+
+/**
+ * Submit handler: records packaging used and adjusts stock.
+ *
+ * Runs after uc_shipping has saved the shipment.
+ */
+function uc_carrier_packaging_shipment_submit($form, &$form_state) {
+  foreach ($form_state['values']['packages'] as $package_id => $values) {
+    if (!isset($values['uc_carrier_packaging'])) {
+      continue;
+    }
+    uc_carrier_packaging_record($package_id, $values['uc_carrier_packaging']);
+  }
+}
+
+/**
+ * Records the packaging used for a package, moving stock as needed.
+ *
+ * @param int $package_id
+ *   The {uc_packages}.package_id.
+ * @param int|string $pid
+ *   The packaging, or '' for none.
+ */
+function uc_carrier_packaging_record($package_id, $pid) {
+  $old = db_query('SELECT * FROM {uc_carrier_packaging_usage} WHERE package_id = :id', array(':id' => $package_id))->fetchObject();
+  if ($old && $old->pid == $pid) {
+    return;
+  }
+
+  $transaction = db_transaction();
+  if ($old) {
+    if ($old->counted) {
+      uc_carrier_packaging_adjust_stock($old->pid, 1);
+    }
+    db_delete('uc_carrier_packaging_usage')->condition('package_id', $package_id)->execute();
+  }
+
+  if ($pid !== '' && ($box = uc_carrier_packaging_load($pid))) {
+    $counted = $box->estimated ? 0 : 1;
+    db_insert('uc_carrier_packaging_usage')
+      ->fields(array('package_id' => $package_id, 'pid' => $pid, 'counted' => $counted))
+      ->execute();
+    if ($counted) {
+      uc_carrier_packaging_adjust_stock($pid, -1);
+    }
+    // Fill in uc_shipping's free-text package type if it was left empty.
+    db_update('uc_packages')
+      ->fields(array('pkg_type' => $box->name))
+      ->condition('package_id', $package_id)
+      ->condition('pkg_type', '')
+      ->execute();
+  }
+}
+
+/**
+ * Changes a packaging's stock, warning when it falls to the reorder level.
+ */
+function uc_carrier_packaging_adjust_stock($pid, $change) {
+  $box = uc_carrier_packaging_load($pid);
+  if (!$box) {
+    return;
+  }
+  $stock = $box->stock + $change;
+  db_update('uc_carrier_packaging')
+    ->fields(array('stock' => $stock))
+    ->condition('pid', $pid)
+    ->execute();
+  backdrop_static_reset('uc_carrier_packaging_all');
+
+  if ($change < 0 && $box->stock > $box->reorder_level && $stock <= $box->reorder_level) {
+    $args = array('@name' => $box->name, '@count' => $stock);
+    backdrop_set_message(t('Packaging low: @name, @count left. Time to order more.', $args), 'warning');
+    $to = config_get('uc_carrier_packaging.settings', 'notify_email');
+    if ($to === '') {
+      $to = config_get('system.core', 'site_mail');
+    }
+    if ($to) {
+      backdrop_mail('uc_carrier_packaging', 'reorder', $to, language_default(), array('box' => $box, 'stock' => $stock));
+    }
+  }
+}
+
+/**
+ * Implements hook_mail().
+ */
+function uc_carrier_packaging_mail($key, &$message, $params) {
+  if ($key == 'reorder') {
+    $args = array(
+      '@name' => $params['box']->name,
+      '@count' => $params['stock'],
+      '@site' => config_get('system.core', 'site_name'),
+      '@url' => url('admin/store/settings/quotes/packaging', array('absolute' => TRUE)),
+    );
+    $message['subject'] = t('@site: order more @name', $args);
+    $message['body'][] = t('Stock of @name is down to @count.', $args);
+    $message['body'][] = t('Packaging: @url', $args);
+  }
+}
+
+/**
+ * Implements hook_uc_shipment().
+ *
+ * Puts stock back when a shipment is deleted.
+ */
+function uc_carrier_packaging_uc_shipment($op, $shipment) {
+  if ($op == 'delete' && !empty($shipment->packages)) {
+    foreach (array_keys($shipment->packages) as $package_id) {
+      uc_carrier_packaging_record($package_id, '');
+    }
+  }
+}

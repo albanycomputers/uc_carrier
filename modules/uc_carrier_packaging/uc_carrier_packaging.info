@@ -1,0 +1,8 @@
+name = Carrier Rates Packaging
+description = Packaging stock (boxes, envelopes, bags): quotes use the smallest packaging that fits, dispatch records what was used, and low stock is flagged.
+dependencies[] = uc_carrier
+package = Ubercart - fulfillment
+backdrop = 1.x
+type = module
+
+configure = admin/store/settings/quotes/packaging

@@ -1,0 +1,9 @@
+name = Carrier Rates
+description = Shipping quotes from carrier price lists (weight band, size format and destination zone), with tracking links. Carriers are provided by submodules.
+dependencies[] = uc_quote
+dependencies[] = uc_shipping
+package = Ubercart - fulfillment
+backdrop = 1.x
+type = module
+
+configure = admin/store/settings/quotes/methods

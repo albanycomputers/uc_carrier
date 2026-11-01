@@ -1,0 +1,63 @@
+/**
+ * @file
+ * Compact price grids and zone tables.
+ */
+/* Only as wide as needed, so a one-zone grid does not stretch. */
+.uc-carrier-prices-grid {
+  width: auto;
+}
+/* Figures right-aligned, as UK price lists show them. */
+.uc-carrier-prices-grid th,
+.uc-carrier-prices-grid td {
+  padding: 0.25em 0.5em;
+  vertical-align: middle;
+  text-align: right;
+}
+.uc-carrier-prices-grid input.form-text {
+  text-align: right;
+}
+.uc-carrier-prices-grid .form-item {
+  margin: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+.uc-carrier-prices-grid input.form-text {
+  display: inline-block;
+  width: 5.5em;
+  min-width: 0;
+  padding: 0.2em 0.4em;
+}
+.uc-carrier-prices-grid .field-suffix {
+  display: inline;
+  margin-left: 0.25em;
+}
+
+/* Services, Sizes and Zone names: full width, names fill their columns. */
+.uc-carrier-definitions {
+  width: 100%;
+}
+.uc-carrier-definitions th,
+.uc-carrier-definitions td {
+  padding: 0.25em 0.5em;
+  vertical-align: middle;
+  text-align: left;
+}
+.uc-carrier-definitions .form-item {
+  margin: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+.uc-carrier-definitions input.form-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.2em 0.4em;
+}
+.uc-carrier-definitions input.uc-carrier-number {
+  display: inline-block;
+  width: 5.5em;
+  text-align: right;
+}
+.uc-carrier-definitions .field-suffix {
+  display: inline;
+  margin-left: 0.25em;
+}
