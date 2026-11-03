@@ -4,7 +4,7 @@
 
 1. Enable **Carrier Rates** and a carrier (e.g. **Royal Mail (UK)**), and
    optionally **Carrier Rates Packaging**.
-2. *Store > Settings > Shipping quotes > Methods*: enable the carrier, then
+2. *Store > Configuration > Shipping quotes > Methods*: enable the carrier, then
    **configure** next to it.
 3. **Settings** tab: tick the services to offer at checkout.
 4. **Prices** tab: check the supplied prices against what you pay.
@@ -84,7 +84,7 @@ items get their prices on the Prices tab.
 The zone of each country installed in the store. Only countries you change
 are stored, so a carrier update to its own zone list still reaches the
 rest. Countries not installed in Ubercart cannot be chosen at checkout at
-all; add them at *Store > Settings > Countries*.
+all; add them at *Store > Configuration > Countries and addresses*.
 
 ### Prices
 
@@ -164,7 +164,7 @@ On each product, under **Shipping settings > Packing**:
 
 ## Packaging (submodule)
 
-Enable **Carrier Rates Packaging**, then *Store > Settings > Shipping quotes
+Enable **Carrier Rates Packaging**, then *Store > Configuration > Shipping quotes
 > Packaging*.
 
 - **Add packaging** for each box, envelope or bag: inside size (what fits),

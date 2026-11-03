@@ -49,7 +49,7 @@ collection in person.
    https://docs.backdropcms.org/documentation/extend-with-modules.
 2. Enable **Carrier Rates** and a carrier, e.g. **Royal Mail (UK)**, and
    optionally **Carrier Rates Packaging**.
-3. Enable the carrier at *Store > Settings > Shipping quotes > Methods*, and
+3. Enable the carrier at *Store > Configuration > Shipping quotes > Methods*, and
    configure it there (services offered, zones, prices).
 4. Give your products a weight and dimensions. Products without a size are
    treated as small extras that fit alongside the rest.
