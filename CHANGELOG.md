@@ -2,6 +2,8 @@
 
 ## 1.x-1.0.0-beta2 (unreleased)
 
+- Docs: README and MANUAL name admin pages by their menu titles (Store > Configuration, Countries and addresses); already on 1.x-1.x (#2).
+
 ## 1.x-1.0.0-beta1 (2026-11-01)
 
 Git tag: `1.x-1.0.0-beta1`.
